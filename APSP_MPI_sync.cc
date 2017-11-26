@@ -13,6 +13,7 @@ int debug = 0;
 double cummTime = 0;
 double IOTime = 0;
 double totalTime = 0;
+double syncTime = 0;
 struct timespec diff(struct timespec start, struct timespec end) {
     struct timespec temp;
     if ((end.tv_nsec-start.tv_nsec)<0) {
@@ -104,12 +105,24 @@ int myMPI_Gather(const void *sendbuf, int sendcount, MPI_Datatype sendtype, void
     cummTime += time_used;
 }
 
+int myMPI_Allreduce(const void *sendbuf, void *recvbuf, int count, MPI_Datatype datatype, MPI_Op op, MPI_Comm comm){
+    struct timespec start, end, temp;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    MPI_Allreduce(sendbuf, recvbuf, count, datatype, op, comm);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    temp = diff(start, end);
+    double time_used = temp.tv_sec + (double) temp.tv_nsec / 1000000000.0;
+    syncTime += time_used;
+}
+
 int **adj; // adjacent matrix
 int *dist; // distance to different source
 int V, E, N;
 int rank, size;
 
 void read(char* in){
+    struct timespec start, end, temp;
+    clock_gettime(CLOCK_MONOTONIC, &start);
     FILE* f = fopen(in, "r");
     fscanf(f, "%d%d", &V, &E);
 
@@ -120,9 +133,15 @@ void read(char* in){
         adj[i][j] = adj[j][i] = w;
     }
     fclose(f);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    temp = diff(start, end);
+    double time_used = temp.tv_sec + (double) temp.tv_nsec / 1000000000.0;
+    IOTime += time_used;
 }
 
 void write(char* out){
+    struct timespec start, end, temp;
+    clock_gettime(CLOCK_MONOTONIC, &start);
     FILE* f = fopen(out, "w");
     for(int i = 0; i < V; i++){
         for(int j = 0; j < V; j++){
@@ -131,6 +150,10 @@ void write(char* out){
         fprintf(f, "\n");
     }
     fclose(f);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    temp = diff(start, end);
+    double time_used = temp.tv_sec + (double) temp.tv_nsec / 1000000000.0;
+    IOTime += time_used;
 }
 
 void APSP(){
@@ -143,7 +166,7 @@ void APSP(){
         // send to neighbor
         for(int i = 0; i < N; i++){
             if((i != rank) && (adj[rank][i] != INF)){
-                MPI_Isend(dist, N, MPI_INT, i, 0, MPI_COMM_WORLD, &requests[i]);
+                myMPI_Isend(dist, N, MPI_INT, i, 0, MPI_COMM_WORLD, &requests[i]);
             }
         }
         int flag = 0;
@@ -152,7 +175,7 @@ void APSP(){
         for(int i = 0; i < N; i++){
             if((i != rank) && (adj[rank][i] != INF)){
                 int tmp[N];
-                MPI_Recv(tmp, N, MPI_INT, i, 0, MPI_COMM_WORLD, &status);
+                myMPI_Recv(tmp, N, MPI_INT, i, 0, MPI_COMM_WORLD, &status);
                 for(int j = 0; j < N; j++){
                     if(dist[i]+tmp[j] < dist[j]){ // if (self to i) + (i to j) < (self to j)
                         dist[j] = dist[i] + tmp[j]; // (self to j) = (self to i) + (i to j)
@@ -162,7 +185,7 @@ void APSP(){
             }
         }
         // collect flag from all
-        MPI_Allreduce(&flag, &gflag, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+        myMPI_Allreduce(&flag, &gflag, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
         if(gflag == 0){
             if(debug) printf("epoch[%d]: break\n", epoch);
             break;
@@ -216,7 +239,7 @@ int main(int argc, char** argv) {
     APSP();
 
     // gather distance
-    MPI_Gather(dist, V, MPI_INT, tmp, V, MPI_INT, 0, MPI_COMM_WORLD);
+    myMPI_Gather(dist, V, MPI_INT, tmp, V, MPI_INT, 0, MPI_COMM_WORLD);
     if(debug && rank == 0){
         printf("adjacent matrix:\n");
         for(int i = 0; i < V; i++){
@@ -240,7 +263,8 @@ int main(int argc, char** argv) {
     totalTime += time_used;
     totalTime -= cummTime;
     totalTime -= IOTime;
-    printf("%f %f %f\n", totalTime, cummTime, IOTime);
+    totalTime -= syncTime;
+    printf("%f %f %f %f\n", totalTime, cummTime, IOTime, syncTime);
     //printf("rank%d: %f %f %f\n", rank, totalTime, cummTime, IOTime);
 
 }

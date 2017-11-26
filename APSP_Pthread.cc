@@ -7,6 +7,20 @@
 #include <limits.h>
 #include <unistd.h>
 #define INF 100000
+double cummTime = 0;
+double IOTime = 0;
+double totalTime = 0;
+struct timespec diff(struct timespec start, struct timespec end) {
+    struct timespec temp;
+    if ((end.tv_nsec-start.tv_nsec)<0) {
+        temp.tv_sec = end.tv_sec-start.tv_sec-1;
+        temp.tv_nsec = 1000000000+end.tv_nsec-start.tv_nsec;
+    } else {
+        temp.tv_sec = end.tv_sec-start.tv_sec;
+        temp.tv_nsec = end.tv_nsec-start.tv_nsec;
+    }
+    return temp;
+}
 int **dist;
 int V, E, N;
 pthread_cond_t cond;
@@ -15,6 +29,8 @@ int counter;
 int *rowBound;
 
 void read(char* in){
+    struct timespec start, end, temp;
+    clock_gettime(CLOCK_MONOTONIC, &start);
     FILE* f = fopen(in, "r");
     fscanf(f, "%d%d", &V, &E);
 
@@ -37,9 +53,15 @@ void read(char* in){
         dist[i][j] = dist[j][i] = w;
     }
     fclose(f);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    temp = diff(start, end);
+    double time_used = temp.tv_sec + (double) temp.tv_nsec / 1000000000.0;
+    IOTime += time_used;
 }
 
 void write(char* out){
+    struct timespec start, end, temp;
+    clock_gettime(CLOCK_MONOTONIC, &start);
     FILE* f = fopen(out, "w");
     for(int i = 0; i < V; i++){
         for(int j = 0; j < V; j++){
@@ -48,6 +70,10 @@ void write(char* out){
         fprintf(f, "\n");
     }
     fclose(f);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    temp = diff(start, end);
+    double time_used = temp.tv_sec + (double) temp.tv_nsec / 1000000000.0;
+    IOTime += time_used;
 }
 
 void* worker(void* arg){
@@ -80,6 +106,8 @@ void* worker(void* arg){
         }
 
         pthread_mutex_lock(&mutex);
+        struct timespec start, end, temp;
+        clock_gettime(CLOCK_MONOTONIC, &start);
         counter++;
         if(counter < N){
             pthread_cond_wait(&cond, &mutex);
@@ -87,12 +115,18 @@ void* worker(void* arg){
             pthread_cond_broadcast(&cond);
             counter = 0;
         }
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        temp = diff(start, end);
+        double time_used = temp.tv_sec + (double) temp.tv_nsec / 1000000000.0;
+        cummTime += time_used;
         pthread_mutex_unlock(&mutex);
     }
     pthread_exit(NULL);
 }
 
 int main(int argc, char** argv) {
+    struct timespec start, end, temp;
+    clock_gettime(CLOCK_MONOTONIC, &start);
 	assert(argc == 4);
     char *in = argv[1];
     char *out = argv[2];
@@ -113,5 +147,13 @@ int main(int argc, char** argv) {
     for(int i = 0; i < V; i++)
         free(dist[i]);
     free(dist);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    temp = diff(start, end);
+    double time_used = temp.tv_sec + (double) temp.tv_nsec / 1000000000.0;
+    totalTime += time_used;
+    cummTime /= N;
+    totalTime -= cummTime;
+    totalTime -= IOTime;
+    printf("%f %f %f\n", totalTime, cummTime, IOTime);
 }
 

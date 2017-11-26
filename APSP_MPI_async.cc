@@ -8,7 +8,7 @@
 #include <unistd.h>
 #include<time.h>
 #define INF 100000
-int debug = 1;
+int debug = 0;
 
 double cummTime = 0;
 double IOTime = 0;
@@ -104,111 +104,122 @@ int myMPI_Gather(const void *sendbuf, int sendcount, MPI_Datatype sendtype, void
     cummTime += time_used;
 }
 
-int **dist; // adjacent matrix
-int *dist2; // distance for different source
-int *num; // num ack not accepted
+int myMPI_Allreduce(const void *sendbuf, void *recvbuf, int count, MPI_Datatype datatype, MPI_Op op, MPI_Comm comm){
+    struct timespec start, end, temp;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    MPI_Allreduce(sendbuf, recvbuf, count, datatype, op, comm);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    temp = diff(start, end);
+    double time_used = temp.tv_sec + (double) temp.tv_nsec / 1000000000.0;
+    cummTime += time_used;
+}
+
+int **adj; // adjacent matrix
+int *dist; // distance to different source
 int V, E, N;
 int rank, size;
-int *pred;
+int num_edge;
 
 void read(char* in){
+    struct timespec start, end, temp;
+    clock_gettime(CLOCK_MONOTONIC, &start);
     FILE* f = fopen(in, "r");
     fscanf(f, "%d%d", &V, &E);
 
     // read edges
+    num_edge = V*(V-1)/2;
     for(int e = 0; e < E; e++){
         int i, j, w;
         fscanf(f, "%d%d%d", &i, &j, &w);
-        dist[i][j] = dist[j][i] = w;
+        adj[i][j] = adj[j][i] = w;
+        num_edge--;
     }
     fclose(f);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    temp = diff(start, end);
+    double time_used = temp.tv_sec + (double) temp.tv_nsec / 1000000000.0;
+    IOTime += time_used;
 }
 
 void write(char* out){
+    struct timespec start, end, temp;
+    clock_gettime(CLOCK_MONOTONIC, &start);
     FILE* f = fopen(out, "w");
     for(int i = 0; i < V; i++){
         for(int j = 0; j < V; j++){
-            fprintf(f, "%d ", dist[i][j]);
+            fprintf(f, "%d ", adj[i][j]);
         }
         fprintf(f, "\n");
     }
     fclose(f);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    temp = diff(start, end);
+    double time_used = temp.tv_sec + (double) temp.tv_nsec / 1000000000.0;
+    IOTime += time_used;
 }
 
 void APSP(){
+    MPI_Request requests[N]; 
+    MPI_Request request;
     MPI_Status status;
-    status.MPI_SOURCE = rank; // at start, pred[rank] = rank
-    pred[rank] = rank;
-    int root = rank;
-    int new_dist = 0; // at start, distacne to self is 0
-    int d[N];
-    int has_send[N];
-    MPI_Request requests[N];
     for(int i = 0; i < N; i++){
-        d[i] = INF;
-        requests[i] = MPI_REQUEST_NULL;
-        has_send[i] = 0;
+        dist[i] = adj[rank][i];
     }
-    int ACK = -1;
-    int total_num = 0;
-    
-    do{
-        if((new_dist != ACK) && (new_dist < dist2[root])){
-            // send ack to old pred
-            if((pred[root] != rank) && (has_send[root]==0)){
-                MPI_Isend(&ACK, 1, MPI_INT, pred[root], root, MPI_COMM_WORLD, &requests[rank]);
+    int ring;
+    for(int epoch = 0; epoch < N; epoch++){
+        // send to neighbor
+        for(int i = 0; i < N; i++){
+            if((i != rank) && (adj[rank][i] != INF)){
+                MPI_Isend(dist, N, MPI_INT, i, 0, MPI_COMM_WORLD, &requests[i]);
             }
-            if(dist2[root] != INF){
-                if(debug) printf("process[%d]: new distance %d is shorter than %d for root %d, send ACK to P%d and change pred to P%d\n", rank, new_dist, dist2[root], root, pred[root], status.MPI_SOURCE);
-            }else{
-                if(debug) printf("process[%d]: new distance %d is shorter than init %d for root %d, change pred to P%d\n", rank, new_dist, dist2[root], root, status.MPI_SOURCE);
-            }
-            dist2[root] = new_dist; /* start searching around vertex */
-            pred[root] = status.MPI_SOURCE;
-            has_send[root] = 0;
-            for(int i = 0; i < V; i++){ /* get next edge */
-                if ((i != pred[root]) && (i != rank) && (dist[rank][i] != INF)) {
-                    d[i] = dist2[root] + dist[rank][i];
-                    MPI_Status tmp_status;
-                    if(requests[i] != MPI_REQUEST_NULL) MPI_Wait(&requests[i], &tmp_status);
-                    MPI_Isend(&d[i], 1, MPI_INT, i, root, MPI_COMM_WORLD, &requests[i]);
-                    num[root]++;
-                    total_num++;
-                    if(debug) printf("process[%d]: send %d to P%d for root %d, num: %d/%d\n", rank, d[i], i, root, num[root], total_num);
+        }
+        int flag = 0; // not down
+        int gflag; // not all down
+        // receive from neighbor
+        for(int i = 0; i < N; i++){
+            if((i != rank) && (adj[rank][i] != INF)){
+                int tmp[N];
+                myMPI_Recv(tmp, N, MPI_INT, i, 0, MPI_COMM_WORLD, &status);
+                for(int j = 0; j < N; j++){
+                    if(dist[i]+tmp[j] < dist[j]){ // if (self to i) + (i to j) < (self to j)
+                        dist[j] = dist[i] + tmp[j]; // (self to j) = (self to i) + (i to j)
+                        flag = 1;
+                    }
                 }
             }
-            if(num[root] == 0){ // no message send, return ACK
-                MPI_Isend(&ACK, 1, MPI_INT, status.MPI_SOURCE, root, MPI_COMM_WORLD, &requests[rank]);
-            }
-        }else if(new_dist == ACK){
-            // if receive ACK and num[root]==0, send ACK to pred[root]
-            //printf("process[%d]: ACK received from P%d for root %d\n", rank, status.MPI_SOURCE, root);
-        }else{
-            // if new distance < shortest distance to root, send ACK back to source
-            if(debug) printf("process[%d]: new distance %d is not shorter than %d"
-                " for root %d, send ACK to P%d\n", rank, new_dist, dist2[root], root, status.MPI_SOURCE);
-            MPI_Isend(&ACK, 1, MPI_INT, status.MPI_SOURCE, root, MPI_COMM_WORLD, &requests[rank]);
         }
-        myMPI_Recv(&new_dist, 1, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-        root = status.MPI_TAG;
-        if(new_dist == ACK){ // receive ACK
-            num[root]--;
-            total_num--;
-            if(debug) printf("precess[%d]: receive ACK for root %d from P%d,"
-                                " num: %d/%d\n", rank, root, status.MPI_SOURCE, num[root], total_num);
-            if((num[root]==0) && (root!=rank)){ // if num become zero, send to pred, do not send to self
-                has_send[root] = 1;
-                if(debug) printf("process[%d]: All ACK received,"
-                    " send ACK to parent P%d for root %d\n", rank, pred[root], root);
-                MPI_Isend(&ACK, 1, MPI_INT, pred[root], root, MPI_COMM_WORLD, &requests[rank]);
-            }
+        // dual ring
+        if(rank==0){
+            ring = 0;
+            MPI_Status tmp_status;
+            myMPI_Send(&ring, 1, MPI_INT, (rank+1)%size, 1, MPI_COMM_WORLD);
+            if(debug) printf("first pass: %d send to %d\n", rank, (rank+1)%size);
+            myMPI_Recv(&ring, 1, MPI_INT, (rank+size-1)%size, 1, MPI_COMM_WORLD, &tmp_status);
+            if(debug) printf("first pass: %d receive from %d\n", rank, (rank+size-1)%size);
+            myMPI_Send(&ring, 1, MPI_INT, (rank+1)%size, 1, MPI_COMM_WORLD);
+            if(debug) printf("second pass: %d send to %d\n", rank, (rank+1)%size);
+            myMPI_Recv(&ring, 1, MPI_INT, (rank+size-1)%size, 1, MPI_COMM_WORLD, &tmp_status);
+            if(debug) printf("second pass: %d receive from %d\n", rank, (rank+size-1)%size);
         }else{
-            if(debug) printf("precess[%d]: receive new distance %d"
-                " for root %d from P%d\n", rank, new_dist, root, status.MPI_SOURCE);
+            MPI_Status tmp_status;
+            myMPI_Recv(&ring, 1, MPI_INT, (rank+size-1)%size, 1, MPI_COMM_WORLD, &tmp_status);
+            if(debug) printf("first pass: %d receive from %d\n", rank, (rank+size-1)%size);
+            ring = ring || flag;
+            myMPI_Send(&ring, 1, MPI_INT, (rank+1)%size, 1, MPI_COMM_WORLD);
+            if(debug) printf("first pass: %d send to %d\n", rank, (rank+1)%size);
+            myMPI_Recv(&ring, 1, MPI_INT, (rank+size-1)%size, 1, MPI_COMM_WORLD, &tmp_status);
+            if(debug) printf("second pass: %d receive from %d\n", rank, (rank+size-1)%size);
+            myMPI_Send(&ring, 1, MPI_INT, (rank+1)%size, 1, MPI_COMM_WORLD);
+            if(debug) printf("second pass: %d send to %d\n", rank, (rank+1)%size);
         }
-    }while(total_num > 0);
-    if(debug) printf("exit loop\n");
-    if(debug) printf("%d %d %d %d\n", rank, dist2[0], dist2[1], dist2[2]);
+        if(ring==0) gflag = 0;
+        else gflag = 1;
+        
+        if(gflag == 0){
+            if(debug) printf("epoch[%d]: break\n", epoch);
+            break;
+        }
+    }
 }
 
 int main(int argc, char** argv) {
@@ -227,40 +238,53 @@ int main(int argc, char** argv) {
 	MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     // initialize adjacent matrix
-    int *adj = (int*) malloc(sizeof(int)*V*V);
-    dist = (int**) malloc(sizeof(int*)*V);
-    num = (int*) malloc(sizeof(int)*V);
-    dist2 = (int*) malloc(sizeof(int)*V);
-    pred = (int*) malloc(sizeof(int)*V);
+    adj = (int**) malloc(sizeof(int*)*V);
+    int *tmp = (int*) malloc(sizeof(int)*V*V);
+    dist = (int*) malloc(sizeof(int)*V);
     for(int i = 0; i < V; i++){
-        dist[i] = &adj[i*V];
+        adj[i] = &tmp[i*V];
         for(int j = 0; j < V; j++)
-            dist[i][j] = INF;
-        dist[i][i] = 0;
-        num[i] = 0;
-        dist2[i] = INF;
-        pred[i] = -1;
+            adj[i][j] = INF;
+        adj[i][i] = 0;
     }
 
     // read file
     if(rank==0)
         read(in);
+
     // broadcast 
-    myMPI_Bcast(adj, V*V, MPI_INT, 0, MPI_COMM_WORLD);
-    APSP();
-    MPI_Gather(dist2, V, MPI_INT, adj, V, MPI_INT, 0, MPI_COMM_WORLD);
-    if(debug && rank == 0){
+    myMPI_Bcast(tmp, V*V, MPI_INT, 0, MPI_COMM_WORLD);
+    if(false){
+        printf("process[%d] adjacent matrix:\n", rank);
         for(int i = 0; i < V; i++){
             for(int j = 0; j < V; j++)
-                printf("%d ", adj[i*V+j]);
+                printf("%d ", adj[i][j]);
             printf("\n");
         }
     }
+
+    // APSP
+    APSP();
+
+    // gather distance
+    myMPI_Gather(dist, V, MPI_INT, tmp, V, MPI_INT, 0, MPI_COMM_WORLD);
+    if(debug && rank == 0){
+        printf("adjacent matrix:\n");
+        for(int i = 0; i < V; i++){
+            for(int j = 0; j < V; j++)
+                printf("%d ", adj[i][j]);
+            printf("\n");
+        }
+    }
+    // write file
+    //
     if(rank==0)
         write(out);
+
+    // MPI_Finalize and free memory
 	MPI_Finalize();
     free(adj);
-    free(dist);
+    free(tmp);
     clock_gettime(CLOCK_MONOTONIC, &end);
     temp = diff(start, end);
     double time_used = temp.tv_sec + (double) temp.tv_nsec / 1000000000.0;
